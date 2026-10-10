@@ -1,0 +1,54 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chef Dashboard</title>
+  <link rel="stylesheet" href="chef.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Chef Dashboard</h1>
+      <p>Restaurant Order Management</p>
+    </div>
+    <span id="connection">Connecting...</span>
+  </header>
+
+  <main class="container">
+    <section class="summary">
+      <div class="summary-card">
+        <span>All Orders</span>
+        <strong id="allCount">0</strong>
+      </div>
+      <div class="summary-card">
+        <span>Preparing</span>
+        <strong id="preparingCount">0</strong>
+      </div>
+      <div class="summary-card">
+        <span>Ready</span>
+        <strong id="readyCount">0</strong>
+      </div>
+    </section>
+
+    <div class="toolbar">
+      <h2>Incoming Orders</h2>
+      <select id="filterStatus" aria-label="Filter orders">
+        <option value="All">All orders</option>
+        <option value="Received">Received</option>
+        <option value="Preparing">Preparing</option>
+        <option value="Ready">Ready</option>
+        <option value="Completed">Completed</option>
+        <option value="Cancelled">Cancelled</option>
+      </select>
+    </div>
+
+    <div id="message" role="status">Loading orders...</div>
+    <section id="orders" class="orders"></section>
+  </main>
+
+  <script type="module" src="chef.js"></script>
+</body>
+</html>
+
