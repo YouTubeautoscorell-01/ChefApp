@@ -6,23 +6,24 @@ import {
   deleteDoc,
   updateDoc,
   onSnapshot,
-  query,
-  orderBy,
   serverTimestamp
 } from "./firebase.js";
 
-const $ = id => document.getElementById(id);
+const ordersList = document.getElementById("ordersList");
+const activeCount = document.getElementById("activeCount");
+const preparingCount = document.getElementById("preparingCount");
+const readyCount = document.getElementById("readyCount");
+const connectionStatus = document.getElementById("connectionStatus");
+const notice = document.getElementById("notice");
+const refreshBtn = document.getElementById("refreshBtn");
 
-// Demo password only. Do not use this as production security.
-const CHEF_PASSWORD = "Chef@123";
-
-let unsubscribeOrders = null;
+let allOrders = [];
+let initialSnapshotReceived = false;
 let knownOrderIds = new Set();
-let firstSnapshot = true;
 let audioContext = null;
-let busyOrders = new Set();
+let noticeTimeout = null;
 
-function safeText(value) {
+function escapeHTML(value) {
   return String(value ?? "").replace(/[&<>"']/g, char => ({
     "&": "&amp;",
     "<": "&lt;",
@@ -32,259 +33,387 @@ function safeText(value) {
   })[char]);
 }
 
-function toast(message) {
-  $("toast").textContent = message;
-  $("toast").style.display = "block";
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => $("toast").style.display = "none", 2800);
+function showNotice(message, isError = false) {
+  notice.textContent = message;
+  notice.className = "notice show" + (isError ? " error-notice" : "");
+
+  clearTimeout(noticeTimeout);
+  noticeTimeout = setTimeout(() => {
+    notice.className = "notice";
+  }, 4500);
 }
 
 function playBeep() {
   try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
 
-    audioContext ||= new AudioCtx();
+    if (!AudioContextClass) return;
+
+    if (!audioContext) {
+      audioContext = new AudioContextClass();
+    }
+
     if (audioContext.state === "suspended") {
       audioContext.resume().catch(() => {});
     }
+
+    if (audioContext.state !== "running") return;
 
     const oscillator = audioContext.createOscillator();
     const gain = audioContext.createGain();
 
     oscillator.type = "sine";
     oscillator.frequency.value = 880;
-    gain.gain.value = 0.12;
+    gain.gain.value = 0.15;
 
     oscillator.connect(gain);
     gain.connect(audioContext.destination);
+
     oscillator.start();
 
+    gain.gain.setValueAtTime(0.15, audioContext.currentTime);
     gain.gain.exponentialRampToValueAtTime(
-      0.001, audioContext.currentTime + 0.35
+      0.001,
+      audioContext.currentTime + 0.35
     );
-    oscillator.stop(audioContext.currentTime + 0.36);
+
+    oscillator.stop(audioContext.currentTime + 0.35);
   } catch (error) {
-    console.warn("Beep unavailable", error);
+    console.warn("Order sound could not play.", error);
   }
 }
 
-function formatTime(timestamp) {
-  if (!timestamp || typeof timestamp.toDate !== "function") {
-    return "Time unavailable";
+// Mobile browsers may require a user gesture before audio can play.
+document.addEventListener("pointerdown", () => {
+  try {
+    const AudioContextClass =
+      window.AudioContext || window.webkitAudioContext;
+
+    if (!audioContext && AudioContextClass) {
+      audioContext = new AudioContextClass();
+    }
+
+    if (audioContext?.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
+  } catch (error) {
+    console.warn("Audio is unavailable.", error);
   }
-  return timestamp.toDate().toLocaleString("en-IN");
+}, { once: true });
+
+function getTimeValue(order) {
+  const value = order.createdAt;
+
+  if (value && typeof value.toMillis === "function") {
+    return value.toMillis();
+  }
+
+  if (value instanceof Date) return value.getTime();
+
+  if (typeof value === "number") return value;
+
+  return 0;
 }
 
-function orderStatus(status) {
-  const allowed = ["Received", "Preparing", "Ready", "Completed"];
-  return allowed.includes(status) ? status : "Received";
+function formatTime(order) {
+  const timestamp = getTimeValue(order);
+
+  if (!timestamp) return "Time unavailable";
+
+  return new Date(timestamp).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
-function renderOrder(id, data) {
-  const items = Array.isArray(data.items) ? data.items : [];
-  const phone = String(data.customerPhone || "").replace(/\D/g, "");
-  const safePhone = phone.slice(-10);
-  const status = orderStatus(data.status);
+function formatPrice(amount) {
+  const value = Number(amount);
+  return "₹" + (Number.isFinite(value) ? value.toFixed(2) : "0.00");
+}
 
-  const itemHTML = items.map(item => {
-    const name = safeText(item.name || "Food item");
-    const qty = Math.max(1, Number(item.qty) || 1);
-    const price = Math.max(0, Number(item.price) || 0);
+function getStatus(order) {
+  const status = String(order.status || "Received");
+
+  if (["Received", "Preparing", "Ready"].includes(status)) {
+    return status;
+  }
+
+  return "Received";
+}
+
+function getStatusClass(status) {
+  return {
+    Received: "status-received",
+    Preparing: "status-preparing",
+    Ready: "status-ready"
+  }[status] || "status-received";
+}
+
+function normalizePhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits.slice(-10);
+}
+
+function renderItems(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '<p class="empty-state">No items found for this order.</p>';
+  }
+
+  return items.map(item => {
+    const name = escapeHTML(item.name || "Food item");
+    const qty = Math.max(0, Number(item.qty) || 0);
+    const price = Number(item.price) || 0;
 
     return `
       <div class="item-row">
-        <span>${name} × ${qty}</span>
-        <span>₹${(price * qty).toFixed(0)}</span>
+        <span class="item-name">${name}
+          <span class="item-qty">× ${qty}</span>
+        </span>
+        <span class="item-price">${formatPrice(price * qty)}</span>
       </div>
     `;
   }).join("");
+}
 
-  const calculatedTotal = items.reduce((sum, item) => {
-    return sum +
-      Math.max(0, Number(item.price) || 0) *
-      Math.max(1, Number(item.qty) || 1);
-  }, 0);
+function renderOrder(id, order) {
+  const status = getStatus(order);
+  const phone = normalizePhone(order.customerPhone);
+  const orderLabel = escapeHTML(id.slice(-7).toUpperCase());
+  const total = Number(order.total) || 0;
+  const paymentStatus = escapeHTML(order.paymentStatus || "Unpaid");
 
-  const total = Number.isFinite(Number(data.total))
-    ? Number(data.total)
-    : calculatedTotal;
+  const phoneHTML = phone
+    ? escapeHTML(phone)
+    : "Phone number unavailable";
 
-  const card = document.createElement("article");
-  card.className = "order-card";
-  card.dataset.id = id;
+  const callButton = phone
+    ? `<a class="call-btn" href="tel:+91${phone}">☎ Call Customer</a>`
+    : "";
 
-  card.innerHTML = `
-    <div class="order-top">
-      <div>
-        <h2>📞 ${safePhone ? "+91 " + safeText(safePhone) : "Number unavailable"}</h2>
-        <div class="order-id">Order ID: ${safeText(id.slice(-8))}</div>
-        <div class="order-id">${safeText(formatTime(data.createdAt))}</div>
+  const preparingDisabled = status === "Preparing" ? "disabled" : "";
+  const readyDisabled = status === "Ready" ? "disabled" : "";
+
+  return `
+    <article class="order-card" data-order-id="${escapeHTML(id)}">
+      <div class="order-head">
+        <div>
+          <h3 class="order-number">Order #${orderLabel}</h3>
+          <p class="order-time">${escapeHTML(formatTime(order))}</p>
+        </div>
+        <span class="status ${getStatusClass(status)}">
+          ${escapeHTML(status)}
+        </span>
       </div>
-      <span class="status">${safeText(status)}</span>
-    </div>
-    <div class="order-body">
-      <div class="section-label">ORDERED ITEMS</div>
-      ${itemHTML || "<p>No item details found.</p>"}
-      <div class="order-total">
-        <span>Total</span>
-        <span>₹${total.toFixed(0)}</span>
+
+      <div class="order-body">
+        <p class="customer-label">Customer mobile</p>
+        <div class="customer-phone">${phoneHTML}</div>
+        ${callButton}
+
+        <h4 class="items-heading">Ordered Items</h4>
+        <div class="items-list">${renderItems(order.items)}</div>
+
+        <div class="order-total">
+          <span>Total Amount</span>
+          <strong>${formatPrice(total)}</strong>
+        </div>
+
+        <p class="payment-note">
+          Payment status: ${paymentStatus}
+        </p>
       </div>
+
       <div class="order-actions">
-        <a class="call-btn"
-          href="${safePhone.length === 10 ? "tel:+91" + safePhone : "#"}"
-          ${safePhone.length === 10 ? "" : 'aria-disabled="true"'}>
-          📞 Call Customer
-        </a>
-        <button class="delete-btn" data-action="delete">
+        <button
+          type="button"
+          class="action-btn prepare-btn"
+          data-action="Preparing"
+          data-id="${escapeHTML(id)}"
+          ${preparingDisabled}>
+          🔥 Preparing
+        </button>
+
+        <button
+          type="button"
+          class="action-btn ready-btn"
+          data-action="Ready"
+          data-id="${escapeHTML(id)}"
+          ${readyDisabled}>
+          ✓ Ready
+        </button>
+
+        <button
+          type="button"
+          class="action-btn delete-btn"
+          data-action="Delete"
+          data-id="${escapeHTML(id)}">
           🗑 Delete Order
         </button>
       </div>
-      <div class="status-actions">
-        <button data-action="Preparing">Preparing</button>
-        <button data-action="Ready">Ready</button>
-      </div>
-    </div>
+    </article>
   `;
-
-  card.querySelectorAll("button[data-action]").forEach(button => {
-    const action = button.dataset.action;
-    button.addEventListener("click", async () => {
-      if (busyOrders.has(id)) return;
-
-      if (action === "delete") {
-        const confirmed = window.confirm(
-          "Delete this order? This cannot be undone."
-        );
-        if (!confirmed) return;
-
-        busyOrders.add(id);
-        button.disabled = true;
-
-        try {
-          await deleteDoc(doc(db, "orders", id));
-          toast("Order deleted.");
-        } catch (error) {
-          console.error(error);
-          toast("Delete failed. Check Firebase permissions.");
-          button.disabled = false;
-        } finally {
-          busyOrders.delete(id);
-        }
-        return;
-      }
-
-      busyOrders.add(id);
-      button.disabled = true;
-      try {
-        await updateDoc(doc(db, "orders", id), {
-          status: action,
-          updatedAt: serverTimestamp()
-        });
-        toast("Order marked " + action + ".");
-      } catch (error) {
-        console.error(error);
-        toast("Status update failed. Check Firebase permissions.");
-      } finally {
-        busyOrders.delete(id);
-        button.disabled = false;
-      }
-    });
-  });
-
-  return card;
 }
 
-function startOrders() {
-  if (unsubscribeOrders) unsubscribeOrders();
-
-  $("connectionMessage").textContent = "Connecting to Firebase...";
-  $("ordersList").replaceChildren();
-  $("emptyMessage").classList.add("hidden");
-  $("activeCount").textContent = "0";
-  knownOrderIds = new Set();
-  firstSnapshot = true;
-
-  const ordersQuery = query(
-    collection(db, "orders"),
-    orderBy("createdAt", "desc")
+function renderOrders() {
+  const activeOrders = allOrders.filter(({ order }) =>
+    !["Completed"].includes(String(order.status || "Received"))
   );
 
-  unsubscribeOrders = onSnapshot(ordersQuery, snapshot => {
-    const nextIds = new Set();
+  activeCount.textContent = activeOrders.length;
+  preparingCount.textContent = activeOrders.filter(
+    ({ order }) => getStatus(order) === "Preparing"
+  ).length;
+  readyCount.textContent = activeOrders.filter(
+    ({ order }) => getStatus(order) === "Ready"
+  ).length;
 
-    snapshot.forEach(orderDoc => {
-      const data = orderDoc.data();
-      const status = orderStatus(data.status);
-
-      // Hide completed orders from the active dashboard.
-      if (status === "Completed") return;
-
-      nextIds.add(orderDoc.id);
-
-      if (!firstSnapshot && !knownOrderIds.has(orderDoc.id)) {
-        playBeep();
-        toast("🔔 New order received!");
-      }
-    });
-
-    knownOrderIds = nextIds;
-    firstSnapshot = false;
-
-    const fragment = document.createDocumentFragment();
-
-    snapshot.docs.forEach(orderDoc => {
-      const data = orderDoc.data();
-      if (orderStatus(data.status) === "Completed") return;
-      fragment.appendChild(renderOrder(orderDoc.id, data));
-    });
-
-    $("ordersList").replaceChildren(fragment);
-    $("activeCount").textContent = nextIds.size;
-    $("emptyMessage").classList.toggle("hidden", nextIds.size !== 0);
-    $("connectionMessage").textContent = "🟢 Connected — live order updates enabled.";
-  }, error => {
-    console.error(error);
-    $("connectionMessage").textContent =
-      "Could not load orders. Check internet and Firebase Firestore rules.";
-    toast("Firebase connection failed.");
-  });
-}
-
-$("loginForm").addEventListener("submit", event => {
-  event.preventDefault();
-
-  if ($("chefPassword").value !== CHEF_PASSWORD) {
-    $("loginError").textContent = "Incorrect password.";
+  if (activeOrders.length === 0) {
+    ordersList.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🍽️</div>
+        <h3>No active orders</h3>
+        <p>New customer orders will appear here automatically.</p>
+      </div>
+    `;
     return;
   }
 
-  $("loginError").textContent = "";
-  $("loginScreen").classList.add("hidden");
-  $("dashboard").classList.remove("hidden");
-  $("logoutBtn").classList.remove("hidden");
+  ordersList.innerHTML = activeOrders.map(({ id, order }) =>
+    renderOrder(id, order)
+  ).join("");
+}
 
-  // Audio is more likely to work after the user's login tap.
+async function updateOrderStatus(id, status, button) {
+  if (!["Preparing", "Ready"].includes(status)) return;
+
+  button.disabled = true;
+
   try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (AudioCtx) {
-      audioContext = new AudioCtx();
-      audioContext.resume().catch(() => {});
-    }
-  } catch (_) {}
+    await updateDoc(doc(db, "orders", id), {
+      status,
+      updatedAt: serverTimestamp()
+    });
 
-  startOrders();
-});
-
-$("logoutBtn").addEventListener("click", () => {
-  if (unsubscribeOrders) {
-    unsubscribeOrders();
-    unsubscribeOrders = null;
+    showNotice(`Order updated to ${status}.`);
+  } catch (error) {
+    console.error("Could not update order:", error);
+    showNotice(
+      "Order update failed. Check your Firebase connection and permissions.",
+      true
+    );
+    button.disabled = false;
   }
+}
 
-  $("dashboard").classList.add("hidden");
-  $("loginScreen").classList.remove("hidden");
-  $("logoutBtn").classList.add("hidden");
-  $("chefPassword").value = "";
-  $("ordersList").replaceChildren();
+async function removeOrder(id, button) {
+  const confirmed = window.confirm(
+    "Are you sure you want to permanently delete this order?"
+  );
+
+  if (!confirmed) return;
+
+  button.disabled = true;
+
+  try {
+    await deleteDoc(doc(db, "orders", id));
+    showNotice("Order deleted successfully.");
+  } catch (error) {
+    console.error("Could not delete order:", error);
+    showNotice(
+      "Could not delete order. Check Firebase permissions.",
+      true
+    );
+    button.disabled = false;
+  }
+}
+
+ordersList.addEventListener("click", async event => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+
+  const id = button.dataset.id;
+  const action = button.dataset.action;
+
+  if (!id) return;
+
+  if (action === "Delete") {
+    await removeOrder(id, button);
+  } else {
+    await updateOrderStatus(id, action, button);
+  }
 });
+
+refreshBtn.addEventListener("click", () => {
+  renderOrders();
+  showNotice("Order list refreshed.");
+});
+
+try {
+  const ordersRef = collection(db, "orders");
+
+  onSnapshot(ordersRef, snapshot => {
+    connectionStatus.textContent = "Connected · Live updates";
+    connectionStatus.className = "connection-status connected";
+
+    const incomingIds = new Set(
+      snapshot.docs.map(orderDoc => orderDoc.id)
+    );
+
+    if (initialSnapshotReceived) {
+      const newOrdersArrived = snapshot.docChanges().some(change =>
+        change.type === "added" &&
+        !knownOrderIds.has(change.doc.id)
+      );
+
+      if (newOrdersArrived) {
+        playBeep();
+        showNotice("🔔 New customer order received!");
+      }
+    }
+
+    knownOrderIds = incomingIds;
+    initialSnapshotReceived = true;
+
+    allOrders = snapshot.docs.map(orderDoc => ({
+      id: orderDoc.id,
+      order: orderDoc.data()
+    }));
+
+    allOrders.sort((a, b) =>
+      getTimeValue(b.order) - getTimeValue(a.order)
+    );
+
+    renderOrders();
+  }, error => {
+    console.error("Firebase listener error:", error);
+
+    connectionStatus.textContent = "Connection error";
+    connectionStatus.className = "connection-status error";
+
+    showNotice(
+      "Orders could not load. Check Firebase setup, internet, and Firestore rules.",
+      true
+    );
+
+    if (!initialSnapshotReceived) {
+      ordersList.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">⚠️</div>
+          <h3>Unable to load orders</h3>
+          <p>Check your internet connection and Firebase permissions.</p>
+        </div>
+      `;
+    }
+  });
+} catch (error) {
+  console.error("Could not start Chef Dashboard:", error);
+
+  connectionStatus.textContent = "Setup error";
+  connectionStatus.className = "connection-status error";
+
+  showNotice("Firebase setup error. Check firebase.js.", true);
+}
