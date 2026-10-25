@@ -1,138 +1,290 @@
 
-import "./firebase.js";
+import {
+  db,
+  collection,
+  doc,
+  deleteDoc,
+  updateDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  serverTimestamp
+} from "./firebase.js";
 
-const db = window.db;
-const fb = window.fb;
+const $ = id => document.getElementById(id);
 
-const ordersEl = document.getElementById("orders");
-const messageEl = document.getElementById("message");
-const connectionEl = document.getElementById("connection");
-const filterEl = document.getElementById("filterStatus");
+// Demo password only. Do not use this as production security.
+const CHEF_PASSWORD = "Chef@123";
 
-let allOrders = [];
+let unsubscribeOrders = null;
+let knownOrderIds = new Set();
+let firstSnapshot = true;
+let audioContext = null;
+let busyOrders = new Set();
 
-function safe(value) {
+function safeText(value) {
   return String(value ?? "").replace(/[&<>"']/g, char => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;",
-    '"': "&quot;", "'": "&#39;"
-  }[char]));
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
 }
 
-function orderTime(order) {
-  const value = order.createdAt;
-  if (value?.toDate) return value.toDate().getTime();
-  if (typeof value === "string" || typeof value === "number") {
-    const parsed = new Date(value).getTime();
-    if (Number.isFinite(parsed)) return parsed;
+function toast(message) {
+  $("toast").textContent = message;
+  $("toast").style.display = "block";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => $("toast").style.display = "none", 2800);
+}
+
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+
+    audioContext ||= new AudioCtx();
+    if (audioContext.state === "suspended") {
+      audioContext.resume().catch(() => {});
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+
+    oscillator.type = "sine";
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.12;
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+    oscillator.start();
+
+    gain.gain.exponentialRampToValueAtTime(
+      0.001, audioContext.currentTime + 0.35
+    );
+    oscillator.stop(audioContext.currentTime + 0.36);
+  } catch (error) {
+    console.warn("Beep unavailable", error);
   }
-  return 0;
 }
 
-function formatTime(order) {
-  const ms = orderTime(order);
-  return ms ? new Date(ms).toLocaleString() : "Time unavailable";
+function formatTime(timestamp) {
+  if (!timestamp || typeof timestamp.toDate !== "function") {
+    return "Time unavailable";
+  }
+  return timestamp.toDate().toLocaleString("en-IN");
 }
 
-function render() {
-  const filter = filterEl.value;
-  const shown = allOrders
-    .filter(order => filter === "All" || (order.status || "Received") === filter)
-    .sort((a, b) => orderTime(b) - orderTime(a));
+function orderStatus(status) {
+  const allowed = ["Received", "Preparing", "Ready", "Completed"];
+  return allowed.includes(status) ? status : "Received";
+}
 
-  document.getElementById("allCount").textContent = allOrders.length;
-  document.getElementById("preparingCount").textContent =
-    allOrders.filter(o => o.status === "Preparing").length;
-  document.getElementById("readyCount").textContent =
-    allOrders.filter(o => o.status === "Ready").length;
+function renderOrder(id, data) {
+  const items = Array.isArray(data.items) ? data.items : [];
+  const phone = String(data.customerPhone || "").replace(/\D/g, "");
+  const safePhone = phone.slice(-10);
+  const status = orderStatus(data.status);
 
-  if (!shown.length) {
-    ordersEl.innerHTML = "";
-    messageEl.textContent = allOrders.length
-      ? "No orders match this filter."
-      : "No orders yet. New customer orders will appear here.";
+  const itemHTML = items.map(item => {
+    const name = safeText(item.name || "Food item");
+    const qty = Math.max(1, Number(item.qty) || 1);
+    const price = Math.max(0, Number(item.price) || 0);
+
+    return `
+      <div class="item-row">
+        <span>${name} × ${qty}</span>
+        <span>₹${(price * qty).toFixed(0)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const calculatedTotal = items.reduce((sum, item) => {
+    return sum +
+      Math.max(0, Number(item.price) || 0) *
+      Math.max(1, Number(item.qty) || 1);
+  }, 0);
+
+  const total = Number.isFinite(Number(data.total))
+    ? Number(data.total)
+    : calculatedTotal;
+
+  const card = document.createElement("article");
+  card.className = "order-card";
+  card.dataset.id = id;
+
+  card.innerHTML = `
+    <div class="order-top">
+      <div>
+        <h2>📞 ${safePhone ? "+91 " + safeText(safePhone) : "Number unavailable"}</h2>
+        <div class="order-id">Order ID: ${safeText(id.slice(-8))}</div>
+        <div class="order-id">${safeText(formatTime(data.createdAt))}</div>
+      </div>
+      <span class="status">${safeText(status)}</span>
+    </div>
+    <div class="order-body">
+      <div class="section-label">ORDERED ITEMS</div>
+      ${itemHTML || "<p>No item details found.</p>"}
+      <div class="order-total">
+        <span>Total</span>
+        <span>₹${total.toFixed(0)}</span>
+      </div>
+      <div class="order-actions">
+        <a class="call-btn"
+          href="${safePhone.length === 10 ? "tel:+91" + safePhone : "#"}"
+          ${safePhone.length === 10 ? "" : 'aria-disabled="true"'}>
+          📞 Call Customer
+        </a>
+        <button class="delete-btn" data-action="delete">
+          🗑 Delete Order
+        </button>
+      </div>
+      <div class="status-actions">
+        <button data-action="Preparing">Preparing</button>
+        <button data-action="Ready">Ready</button>
+      </div>
+    </div>
+  `;
+
+  card.querySelectorAll("button[data-action]").forEach(button => {
+    const action = button.dataset.action;
+    button.addEventListener("click", async () => {
+      if (busyOrders.has(id)) return;
+
+      if (action === "delete") {
+        const confirmed = window.confirm(
+          "Delete this order? This cannot be undone."
+        );
+        if (!confirmed) return;
+
+        busyOrders.add(id);
+        button.disabled = true;
+
+        try {
+          await deleteDoc(doc(db, "orders", id));
+          toast("Order deleted.");
+        } catch (error) {
+          console.error(error);
+          toast("Delete failed. Check Firebase permissions.");
+          button.disabled = false;
+        } finally {
+          busyOrders.delete(id);
+        }
+        return;
+      }
+
+      busyOrders.add(id);
+      button.disabled = true;
+      try {
+        await updateDoc(doc(db, "orders", id), {
+          status: action,
+          updatedAt: serverTimestamp()
+        });
+        toast("Order marked " + action + ".");
+      } catch (error) {
+        console.error(error);
+        toast("Status update failed. Check Firebase permissions.");
+      } finally {
+        busyOrders.delete(id);
+        button.disabled = false;
+      }
+    });
+  });
+
+  return card;
+}
+
+function startOrders() {
+  if (unsubscribeOrders) unsubscribeOrders();
+
+  $("connectionMessage").textContent = "Connecting to Firebase...";
+  $("ordersList").replaceChildren();
+  $("emptyMessage").classList.add("hidden");
+  $("activeCount").textContent = "0";
+  knownOrderIds = new Set();
+  firstSnapshot = true;
+
+  const ordersQuery = query(
+    collection(db, "orders"),
+    orderBy("createdAt", "desc")
+  );
+
+  unsubscribeOrders = onSnapshot(ordersQuery, snapshot => {
+    const nextIds = new Set();
+
+    snapshot.forEach(orderDoc => {
+      const data = orderDoc.data();
+      const status = orderStatus(data.status);
+
+      // Hide completed orders from the active dashboard.
+      if (status === "Completed") return;
+
+      nextIds.add(orderDoc.id);
+
+      if (!firstSnapshot && !knownOrderIds.has(orderDoc.id)) {
+        playBeep();
+        toast("🔔 New order received!");
+      }
+    });
+
+    knownOrderIds = nextIds;
+    firstSnapshot = false;
+
+    const fragment = document.createDocumentFragment();
+
+    snapshot.docs.forEach(orderDoc => {
+      const data = orderDoc.data();
+      if (orderStatus(data.status) === "Completed") return;
+      fragment.appendChild(renderOrder(orderDoc.id, data));
+    });
+
+    $("ordersList").replaceChildren(fragment);
+    $("activeCount").textContent = nextIds.size;
+    $("emptyMessage").classList.toggle("hidden", nextIds.size !== 0);
+    $("connectionMessage").textContent = "🟢 Connected — live order updates enabled.";
+  }, error => {
+    console.error(error);
+    $("connectionMessage").textContent =
+      "Could not load orders. Check internet and Firebase Firestore rules.";
+    toast("Firebase connection failed.");
+  });
+}
+
+$("loginForm").addEventListener("submit", event => {
+  event.preventDefault();
+
+  if ($("chefPassword").value !== CHEF_PASSWORD) {
+    $("loginError").textContent = "Incorrect password.";
     return;
   }
 
-  messageEl.textContent = `${shown.length} order(s)`;
-  ordersEl.innerHTML = shown.map(order => {
-    const items = Array.isArray(order.items) ? order.items : [];
-    const status = order.status || "Received";
-    const phone = order.customerPhone || order.mobile || "Not provided";
-    const total = Number(order.total) || 0;
+  $("loginError").textContent = "";
+  $("loginScreen").classList.add("hidden");
+  $("dashboard").classList.remove("hidden");
+  $("logoutBtn").classList.remove("hidden");
 
-    return `
-      <article class="order-card">
-        <h3>Order #${safe(order.id.slice(-6).toUpperCase())}</h3>
-        <div class="order-meta">
-          <div>Customer: ${safe(order.customerName || "Customer")}</div>
-          <div>Mobile: ${safe(phone)}</div>
-          <div>Table: ${safe(order.tableNumber || order.table || "Not assigned")}</div>
-          <div>Time: ${safe(formatTime(order))}</div>
-        </div>
-        <p><span class="status">${safe(status)}</span></p>
-        <strong>Items</strong>
-        <ul class="item-list">
-          ${items.map(item => `
-            <li>${safe(item.name || "Item")} × ${Math.max(0, Number(item.qty) || 0)}
-              ${item.note ? `<br><small>Note: ${safe(item.note)}</small>` : ""}
-            </li>
-          `).join("") || "<li>Item details unavailable</li>"}
-        </ul>
-        ${order.notes ? `<p>Special request: ${safe(order.notes)}</p>` : ""}
-        <div class="order-total">Total: ₹${total.toFixed(2)}</div>
-        <div class="actions">
-          ${status !== "Preparing" && status !== "Completed" && status !== "Cancelled"
-            ? `<button data-status="Preparing" data-id="${safe(order.id)}">Start Preparing</button>` : ""}
-          ${status !== "Ready" && status !== "Completed" && status !== "Cancelled"
-            ? `<button data-status="Ready" data-id="${safe(order.id)}">Mark Ready</button>` : ""}
-          ${status !== "Completed" && status !== "Cancelled"
-            ? `<button class="secondary" data-status="Completed" data-id="${safe(order.id)}">Complete</button>` : ""}
-          ${status !== "Cancelled" && status !== "Completed"
-            ? `<button class="secondary" data-status="Cancelled" data-id="${safe(order.id)}">Cancel</button>` : ""}
-        </div>
-      </article>`;
-  }).join("");
-}
-
-filterEl.addEventListener("change", render);
-
-ordersEl.addEventListener("click", async event => {
-  const button = event.target.closest("button[data-status]");
-  if (!button) return;
-
-  const id = button.dataset.id;
-  const status = button.dataset.status;
-  button.disabled = true;
-
+  // Audio is more likely to work after the user's login tap.
   try {
-    await fb.updateDoc(fb.doc(db, "orders", id), {
-      status,
-      updatedAt: fb.serverTimestamp()
-    });
-    messageEl.textContent = `Order updated: ${status}`;
-  } catch (error) {
-    console.error(error);
-    messageEl.textContent = "Status update failed. Check Firebase permissions and connection.";
-    button.disabled = false;
-  }
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      audioContext = new AudioCtx();
+      audioContext.resume().catch(() => {});
+    }
+  } catch (_) {}
+
+  startOrders();
 });
 
-try {
-  fb.onSnapshot(
-    fb.collection(db, "orders"),
-    snapshot => {
-      allOrders = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      connectionEl.textContent = "Live connected";
-      render();
-    },
-    error => {
-      console.error(error);
-      connectionEl.textContent = "Connection error";
-      messageEl.textContent = "Orders could not load. Check Firebase configuration and Firestore rules.";
-    }
-  );
-} catch (error) {
-  console.error(error);
-  connectionEl.textContent = "Connection error";
-  messageEl.textContent = "Firebase initialization failed.";
-}
+$("logoutBtn").addEventListener("click", () => {
+  if (unsubscribeOrders) {
+    unsubscribeOrders();
+    unsubscribeOrders = null;
+  }
+
+  $("dashboard").classList.add("hidden");
+  $("loginScreen").classList.remove("hidden");
+  $("logoutBtn").classList.add("hidden");
+  $("chefPassword").value = "";
+  $("ordersList").replaceChildren();
+});
