@@ -4,50 +4,66 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#dff3ff">
   <title>Chef Dashboard</title>
   <link rel="stylesheet" href="chef.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">👨‍🍳 Chef Dashboard</div>
-    <button id="logoutBtn" class="outline-btn hidden">Logout</button>
+    <div class="brand">
+      <div class="brand-icon">♨</div>
+      <div>
+        <h1>Chef Dashboard</h1>
+        <p>Restaurant Order Management</p>
+      </div>
+    </div>
+    <div class="live-indicator"><span></span> Live Orders</div>
   </header>
 
-  <main>
-    <section id="loginScreen" class="login-wrap">
-      <div class="login-card">
-        <div class="chef-icon">👨‍🍳</div>
-        <h1>Chef Login</h1>
-        <p>Enter the dashboard password.</p>
-        <form id="loginForm">
-          <label for="chefPassword">Password</label>
-          <input id="chefPassword" type="password" placeholder="Enter password" required>
-          <p id="loginError" class="error"></p>
-          <button class="primary-btn" type="submit">Login to Dashboard</button>
-        </form>
+  <main class="container">
+    <section class="welcome">
+      <div>
+        <p class="eyebrow">KITCHEN CONTROL PANEL</p>
+        <h2>Incoming Orders</h2>
+        <p class="subtitle">Manage and update customer orders.</p>
+      </div>
+      <button id="refreshBtn" class="refresh-btn" type="button">↻ Refresh</button>
+    </section>
+
+    <section class="stats">
+      <div class="stat-card">
+        <span class="stat-icon">📋</span>
+        <div><p>Active Orders</p><strong id="activeCount">0</strong></div>
+      </div>
+      <div class="stat-card">
+        <span class="stat-icon">🔥</span>
+        <div><p>Preparing</p><strong id="preparingCount">0</strong></div>
+      </div>
+      <div class="stat-card">
+        <span class="stat-icon">✅</span>
+        <div><p>Ready</p><strong id="readyCount">0</strong></div>
       </div>
     </section>
 
-    <section id="dashboard" class="hidden">
-      <div class="dashboard-head">
-        <div>
-          <h1>Active Orders</h1>
-          <p>Orders update automatically from Firebase.</p>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+    <section class="orders-section">
+      <div class="section-heading">
+        <h3>Order List</h3>
+        <span id="connectionStatus" class="connection-status">Connecting...</span>
+      </div>
+      <div id="ordersList" class="orders-grid">
+        <div class="empty-state">
+          <div class="empty-icon">🍽️</div>
+          <h3>Loading orders...</h3>
+          <p>Please wait while orders are loaded.</p>
         </div>
-        <div class="order-count">Active: <strong id="activeCount">0</strong></div>
       </div>
-
-      <div id="connectionMessage" class="notice">Connecting to orders...</div>
-      <div id="emptyMessage" class="empty hidden">
-        <div>🍽️</div>
-        <h2>No active orders</h2>
-        <p>New customer orders will appear here.</p>
-      </div>
-      <div id="ordersList" class="orders-grid"></div>
     </section>
+
+    <footer>Chef Dashboard · Live order management</footer>
   </main>
 
-  <div id="toast" class="toast"></div>
   <script type="module" src="chef.js"></script>
 </body>
 </html>
