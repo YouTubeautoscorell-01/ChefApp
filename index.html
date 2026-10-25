@@ -1,0 +1,53 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chef Dashboard</title>
+  <link rel="stylesheet" href="chef.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">👨‍🍳 Chef Dashboard</div>
+    <button id="logoutBtn" class="outline-btn hidden">Logout</button>
+  </header>
+
+  <main>
+    <section id="loginScreen" class="login-wrap">
+      <div class="login-card">
+        <div class="chef-icon">👨‍🍳</div>
+        <h1>Chef Login</h1>
+        <p>Enter the dashboard password.</p>
+        <form id="loginForm">
+          <label for="chefPassword">Password</label>
+          <input id="chefPassword" type="password" placeholder="Enter password" required>
+          <p id="loginError" class="error"></p>
+          <button class="primary-btn" type="submit">Login to Dashboard</button>
+        </form>
+      </div>
+    </section>
+
+    <section id="dashboard" class="hidden">
+      <div class="dashboard-head">
+        <div>
+          <h1>Active Orders</h1>
+          <p>Orders update automatically from Firebase.</p>
+        </div>
+        <div class="order-count">Active: <strong id="activeCount">0</strong></div>
+      </div>
+
+      <div id="connectionMessage" class="notice">Connecting to orders...</div>
+      <div id="emptyMessage" class="empty hidden">
+        <div>🍽️</div>
+        <h2>No active orders</h2>
+        <p>New customer orders will appear here.</p>
+      </div>
+      <div id="ordersList" class="orders-grid"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script type="module" src="chef.js"></script>
+</body>
+</html>
